@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # Copyright 2017 Jean-Baptiste Denis <jbd@jbdenis.net>
@@ -117,7 +117,7 @@ def _e(value):
     """
     dirty helper
     """
-    if type(value) is unicode:
+    if type(value) is str:
         return value.encode(STDOUT_ENCODING)
     else:
         return value
@@ -399,12 +399,12 @@ class Options: # pragma: no cover
         """
         try:
             (flags,extra) = self.optfunc(args, self._shortopts, self._longopts)
-        except getopt.GetoptError, e:
+        except getopt.GetoptError as e:
             self.fatal(e)
 
         opt = OptDict(aliases=self._aliases)
 
-        for k,v in self._defaults.iteritems():
+        for k,v in self._defaults.items():
             opt[k] = v
 
         for (k,v) in flags:
@@ -502,11 +502,10 @@ def human_size(value):
     size = int(value[:-1])
     multiple = value[-1]
 
-    if multiple not in m2s.keys():
+    if multiple not in list(m2s.keys()):
         return None
 
     return size * m2s[multiple]
-
 
 def crawl(path, relative=False):
     """
@@ -525,7 +524,6 @@ def crawl(path, relative=False):
         print_message("msrsync crawl: %s" % oserror, MSG_STDERR)
 
     root_size = len(path) if relative else 0
-
     for root, dirs, files in os.walk(path, onerror=onerror):
         # we want empty dir to be listed in bucket
         if len(dirs) == 0 and len(files) == 0:
@@ -549,6 +547,9 @@ def buckets(path, filesnr, size):
     bucket_files_nr = 0
     bucket_size = 0
     bucket = list()
+    winbucket_files_nr = 0
+    winbucket_size = 0
+    winbucket = list()
 
 
     # if we've got a trailing slash in the path, we want
@@ -561,9 +562,25 @@ def buckets(path, filesnr, size):
     base = os.path.split(path)[1]
 
     for fsize, rpath in crawl(path, relative=True):
-        bucket.append(os.path.join(base, rpath.lstrip(os.sep)))
-        bucket_files_nr += 1
-        bucket_size += fsize
+    # trying to account for windows encoded files here since python3 is utf-8 by default
+        try:
+            rpathstripped = (rpath.decode('utf-8').lstrip(os.sep) + '\0').encode()
+            joinedpath = os.path.join(base, rpathstripped)
+            bucket.append(joinedpath)
+            bucket_files_nr += 1
+            bucket_size += fsize
+        except UnicodeDecodeError:
+            win_rpathstripped = (rpath.decode('ISO-8859-1').lstrip(os.sep) + '\0').encode('ISO-8859-1')
+            win_path = os.path.join(base, win_rpathstripped)
+    #        if os.path.exists('encoding_errors'):
+    #            openmode = 'ab'
+    #        else:
+    #            openmode = 'wb'
+    #        with open ('encoding_errors', openmode) as f:
+    #            f.write(win_path)
+            winbucket.append(win_path)
+            winbucket_files_nr += 1
+            winbucket_size += fsize
 
         if bucket_size >= size or bucket_files_nr >= filesnr:
             yield (bucket_files_nr, bucket_size, bucket)
@@ -571,9 +588,17 @@ def buckets(path, filesnr, size):
             bucket_files_nr = 0
             bucket = list()
 
+        if winbucket_size >= size or winbucket_files_nr >= filesnr:
+            yield (winbucket_files_nr, winbucket_size, winbucket)
+            winbucket_size = 0
+            winbucket_files_nr = 0
+            winbucket = list()
+
     if bucket_files_nr > 0:
         yield (bucket_files_nr, bucket_size, bucket)
 
+    if winbucket_files_nr > 0:
+        yield (winbucket_files_nr, winbucket_size, winbucket)
 
 def _valid_rsync_options(options, rsync_opts):
     """
@@ -590,6 +615,7 @@ def parse_cmdline(cmdline_argv):
     command line parsing of msrsync using bup/options.py
     See https://github.com/bup/bup/blob/master/lib/bup/options.py
     """
+    srcs = []
 
     # If I want to run this script on RHEL6 and derivatives without installing any dependencies
     # except python and rsync, I can't rely on argparse which is only available in python >= 2.7
@@ -614,7 +640,7 @@ def parse_cmdline(cmdline_argv):
             options.fatal('You must provide a source, a destination and eventually rsync options with --rsync')
         opt.rsync = opt.r = cmdline_argv[idx+1] # pylint: disable=invalid-name, attribute-defined-outside-init
         _valid_rsync_options(options, opt.rsync)
-        srcs, dest = cmdline_argv[idx+2:-1], cmdline_argv[-1]
+        dirtysrcs, dest = cmdline_argv[idx+2:-1], cmdline_argv[-1]
     else:
         # no --rsync options marker on the command line.
         (opt, _, extra) = options.parse(cmdline_argv[1:])
@@ -623,7 +649,11 @@ def parse_cmdline(cmdline_argv):
         opt.rsync = opt.r = DEFAULT_RSYNC_OPTIONS # pylint: disable=attribute-defined-outside-init
         if not extra or len(extra) < 2:
             options.fatal('You must provide a source and a destination')
-        srcs, dest = extra[:-1], extra[-1]
+        dirtysrcs, dest = extra[:-1], extra[-1]
+
+    for src in dirtysrcs:
+        src = str.encode(src)
+        srcs.append(src)
 
     size = human_size(str(opt.size))
     if not size:
@@ -644,27 +674,51 @@ def rmtree_onerror(func, path, exc_info):
     Error handler for shutil.rmtree.
     """
     # pylint: disable=unused-argument
-    print >>sys.stderr, "Error removing", path
+    print("Error removing", path, file=sys.stderr)
 
 
 def write_bucket(filename, bucket, compress=False):
     """
-    Dump bucket filenames in a optionnaly compressed file
+    Dump bucket filenames in a optionally compressed file
     """
     try:
         fileno, path = filename
         if not compress:
             with os.fdopen(fileno, 'wb') as bfile:
                 for entry in bucket:
-                    bfile.write(entry + '\0')
+                    bfile.write(entry)
         else:
             os.close(fileno)
-            with gzip.open(path, 'wb') as bfile:
+            with gzip.open(path, 'w') as bfile:
                 for entry in bucket:
                     bfile.write(entry)
-    except IOError, err:
-        raise BucketError("Cannot write bucket file %s: %s" % (path, err))
+    except:
+        raise BucketError("Cannot write bucket file %s: %s" % (path, sys.exc_info()[0]))
 
+
+#def write_bucket(filename, bucket, compress=False):
+#    """
+#    Dump bucket filenames in a optionally compressed file
+#    """
+#    fileno, path = filename
+#    if not compress:
+#        with os.fdopen(fileno, 'w') as bfile:
+#            for entry in bucket:
+#                try:
+#                    bfile.write(entry + '\0')
+#                except:
+#                    print("Unable to write {} because {}".format(ascii(entry), sys.exc_info()[0]))
+#                    continue
+#                    
+#    else:
+#        os.close(fileno)
+#        with gzip.open(path, 'w') as bfile:
+#            for entry in bucket:
+#                try:
+#                    bfile.write(entry)
+#                except:
+#                    print("Unable to write {} because {}".format(ascii(entry), sys.exc_info()[0]))
+#                    continue
 
 def consume_queue(jobs_queue):
     """
@@ -705,10 +759,10 @@ def run(cmd, capture_stdout=False, capture_stderr=False, timeout_sec=sys.maxsize
             stderr = ""
         timer.cancel()
         elapsed = time.time() - starttime
-    except OSError, err:
+    except OSError as err:
         return -1, "", "Cannot launch %s: %s" % (cmd, err), False, 0
     except KeyboardInterrupt:
-        if vars().has_key('timer'):
+        if 'timer' in vars():
             timer.cancel()
         if proc:
             if proc.stdout:
@@ -719,7 +773,7 @@ def run(cmd, capture_stdout=False, capture_stderr=False, timeout_sec=sys.maxsize
             proc.wait()
         return 666, "", "Interrupted", False, 0
 
-    return proc.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"), timeout["value"], elapsed
+    return proc.returncode, stdout, stderr, timeout["value"], elapsed
 
 
 # stolen from stackoverflow (http://stackoverflow.com/a/377028)
@@ -757,16 +811,16 @@ def _check_rsync_options(options):
         rsync_cmd = "%s %s %s %s" % (RSYNC_EXE, options + ' --quiet --stats --verbose --from0 --log-file %s' % rsync_log, src + os.sep, dst)
         ret, _, stderr, timeout, _ = run(rsync_cmd, timeout_sec=60) # this should not take more than one minute =)
         if timeout:
-            print >>sys.stderr, '''Error during rsync options check command "%s": took more than 60 seconds !''' % rsync_cmd
+            print('''Error during rsync options check command "%s": took more than 60 seconds !''' % rsync_cmd, file=sys.stderr)
             sys.exit(ERSYNC_OPTIONS_CHECK)
         elif ret != 0:
-            print >>sys.stderr, '''Error during rsync options check command "%s": %s''' % (rsync_cmd, 2*os.linesep + stderr)
+            print('''Error during rsync options check command "%s": %s''' % (rsync_cmd, 2*os.linesep + stderr), file=sys.stderr)
             sys.exit(ERSYNC_OPTIONS_CHECK)
-    except OSError, err:
+    except OSError as err:
         if rsync_cmd:
-            print >>sys.stderr, '''Error during rsync options check command "%s": %s''' % (rsync_cmd, 2*os.linesep + err)
+            print('''Error during rsync options check command "%s": %s''' % (rsync_cmd, 2*os.linesep + err), file=sys.stderr)
         else:
-            print >>sys.stderr, '''Error during rsync options check ("%s"): %s''' % (options, 2*os.linesep + err)
+            print('''Error during rsync options check ("%s"): %s''' % (options, 2*os.linesep + err), file=sys.stderr)
         sys.exit(ERSYNC_OPTIONS_CHECK)
     finally:
         try:
@@ -785,7 +839,7 @@ def run_rsync(files_from, rsync_opts, src, dest, timeout=3600*24*7):
     # this looks very close to the _check_rsync_options function...
     # except the error message
     rsync_log = files_from + '.log'
-    rsync_cmd = '%s %s %s "%s" "%s"' % (RSYNC_EXE, rsync_opts, "--quiet --verbose --stats --from0 --files-from=%s --log-file %s" % (files_from, rsync_log), src, dest)
+    rsync_cmd = '%s %s %s "%s" "%s"' % (RSYNC_EXE, rsync_opts, "--quiet --verbose --stats --from0 --files-from=%s --log-file %s" % (files_from, rsync_log), src.decode('utf-8'), dest)
     #rsync_cmd = "%s %s %s %s %s" % (RSYNC_EXE, rsync_opts, "--quiet --from0 --files-from=%s" % (files_from,), src, dest)
 
     rsync_result = dict()
@@ -805,7 +859,7 @@ def run_rsync(files_from, rsync_opts, src, dest, timeout=3600*24*7):
         elif ret != 0:
             rsync_result["errcode"] = ERSYNC_JOB
 
-    except OSError, err:
+    except OSError as err:
         rsync_result["errcode"] = ERSYNC_JOB
         rsync_result["msg"] = str(err)
 
@@ -950,25 +1004,25 @@ def messages_worker(options):
             if cur_msg_type == MSG_PROGRESS:
                 print_update(result["message"])
             elif cur_msg_type == MSG_STDOUT:
-                print >>sys.stdout, _e(newline + result["message"])
+                print(_e(newline + result["message"]), file=sys.stdout)
             elif cur_msg_type == MSG_STDERR:
-                print >>sys.stderr, _e(newline + result["message"])
+                print(_e(newline + result["message"]), file=sys.stderr)
             else:
-                print >>sys.stderr, _e(newline + "Unknown message type '%s': %s" % (cur_msg_type, result))
+                print(_e(newline + "Unknown message type '%s': %s" % (cur_msg_type, result)), file=sys.stderr)
             last_msg_type = cur_msg_type
 
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         if last_msg_type == MSG_PROGRESS:
-            print >>sys.stdout, ''
+            print('', file=sys.stdout)
 
 def start_rsync_workers(jobs_queue, monitor_queue, options, dest):
     """
     Helper to start rsync processes
     """
     processes = []
-    for _ in xrange(options.processes):
+    for _ in range(options.processes):
         processes.append(multiprocessing.Process(target=rsync_worker, args=(jobs_queue, monitor_queue, options, dest)))
         processes[-1].start()
     return processes
@@ -1009,23 +1063,23 @@ def show_stats(msrsync_stat):
     else:
         status = "FAILURE, %d rsync processe(s) had errors" % s["errors"]
 
-    print "Status:", status
-    print "Working directory:", os.getcwd()
-    print "Command line:", " ".join(sys.argv)
-    print "Total size: %s" % get_human_size(s["total_size"])
-    print "Total entries: %s" % s["total_entries"]
+    print("Status:", status)
+    print("Working directory:", os.getcwd())
+    print("Command line:", " ".join(sys.argv))
+    print("Total size: %s" % get_human_size(s["total_size"]))
+    print("Total entries: %s" % s["total_entries"])
     buckets_nr = s["buckets_nr"]
-    print "Buckets number: %d" % buckets_nr
+    print("Buckets number: %d" % buckets_nr)
     if buckets_nr > 0:
-        print "Mean entries per bucket: %d" % ((s["total_entries"] * 1.)/ buckets_nr)
-        print "Mean size per bucket: %s" % get_human_size((s["total_size"] * 1.)/ buckets_nr)
+        print("Mean entries per bucket: %d" % ((s["total_entries"] * 1.)/ buckets_nr))
+        print("Mean size per bucket: %s" % get_human_size((s["total_size"] * 1.)/ buckets_nr))
 
-    print "Entries per second: %d" % s["entries_per_second"]
-    print "Speed: %s/s" % get_human_size(s["bytes_per_second"])
-    print "Rsync workers: %d" % s["rsync_workers"]
-    print "Total rsync's processes (%d) cumulative runtime: %.1fs" % (buckets_nr, s["rsync_runtime"])
-    print "Crawl time: %.1fs (%.1f%% of total runtime)" % (s["crawl_time"], 100* s["crawl_time"]/s["total_time"])
-    print "Total time: %.1fs" % s["total_time"]
+    print("Entries per second: %d" % s["entries_per_second"])
+    print("Speed: %s/s" % get_human_size(s["bytes_per_second"]))
+    print("Rsync workers: %d" % s["rsync_workers"])
+    print("Total rsync's processes (%d) cumulative runtime: %.1fs" % (buckets_nr, s["rsync_runtime"]))
+    print("Crawl time: %.1fs (%.1f%% of total runtime)" % (s["crawl_time"], 100* s["crawl_time"]/s["total_time"]))
+    print("Total time: %.1fs" % s["total_time"])
 
 
 def msrsync(options, srcs, dest):
@@ -1040,18 +1094,18 @@ def msrsync(options, srcs, dest):
             options.buckets = tempfile.mkdtemp(prefix="msrsync-")
         else:
             if not os.path.exists(options.buckets):
-                print >>sys.stderr, options.buckets, "bucket directory does not exist."
+                print(options.buckets, "bucket directory does not exist.", file=sys.stderr)
                 sys.exit(EBUCKET_DIR_NOEXIST)
             if not os.access(options.buckets, os.W_OK):
-                print >>sys.stderr, options.buckets, "bucket directory is not writable."
+                print(options.buckets, "bucket directory is not writable.", file=sys.stderr)
                 sys.exit(EBUCKET_DIR_PERMS)
             options.buckets = tempfile.mkdtemp(prefix="msrsync-", dir=options.buckets)
-    except OSError, err:
-        print >>sys.stderr, '''Error with bucket directory creation: "%s"''' % err
+    except OSError as err:
+        print('''Error with bucket directory creation: "%s"''' % err, file=sys.stderr)
         sys.exit(EBUCKET_DIR_OSERROR)
 
     if options.show:
-        print "buckets dir is", options.buckets
+        print("buckets dir is", options.buckets)
 
     manager = SyncManager()
     #manager.start(multiprocess_mgr_init) # Oups... This is in python 2.7...
@@ -1103,7 +1157,7 @@ def msrsync(options, srcs, dest):
                 # get turned into file-list elements.
                 bucket.sort()
                 # the idea is prevent to have too much files in a single directory
-                d1s = str(bucket_nr / 1024).zfill(8)
+                d1s = str(int(bucket_nr / 1024)).zfill(8)
                 # with bucket_nr == 12, d1s == i'00000000'
                 # tdir = options.buckets/0000/0000
                 # with bucket_nr == 11058, d1s == '00000100'
@@ -1116,7 +1170,7 @@ def msrsync(options, srcs, dest):
                         os.makedirs(tdir)
                     # the fd is closed within write_bucket
                     fileno, filename = tempfile.mkstemp(dir=tdir)
-                except OSError, err:
+                except OSError as err:
                     print_message('msrsync scan: cannot create temporary bucket file: "%s"' % err, MSG_STDERR)
                     continue
                 write_bucket((fileno, filename), bucket, options.compress)
@@ -1155,10 +1209,10 @@ def msrsync(options, srcs, dest):
 
         messages_worker_proc.terminate()
         messages_worker_proc.join()
-    except BucketError, err:
-        print >>sys.stderr, err
+    except BucketError as err:
+        print(err, file=sys.stderr)
     except Exception: # pylint: disable=broad-except
-        print >>sys.stderr, "Uncaught exception:" + os.linesep + traceback.format_exc()
+        print("Uncaught exception:" + os.linesep + traceback.format_exc(), file=sys.stderr)
     finally:
         manager.shutdown()
         if options.buckets is not None and not options.keep:
@@ -1177,7 +1231,7 @@ def _check_executables():
     for exe in exes:
         prog = which(exe)
         if not prog:
-            print >>sys.stderr, "Cannot find '%s' executable in PATH." % exe
+            print("Cannot find '%s' executable in PATH." % exe, file=sys.stderr)
             sys.exit(EBIN_NOTFOUND)
         paths[exe] = prog
 
@@ -1190,10 +1244,10 @@ def _check_srcs_dest(srcs, dest):
     """
     for src in srcs:
         if not os.path.isdir(src):
-            print >>sys.stderr, "Source '%s' is not a directory" % src
+            print("Source '%s' is not a directory" % src, file=sys.stderr)
             sys.exit(ESRC_NOT_DIR)
         if not os.access(src, os.R_OK|os.X_OK):
-            print >>sys.stderr, "No access to source directory '%s'" % src
+            print("No access to source directory '%s'" % src, file=sys.stderr)
             sys.exit(ESRC_NO_ACCESS)
 
     # dest may not exist, just as in rsync : "rsync -a src dst" will create
@@ -1202,16 +1256,16 @@ def _check_srcs_dest(srcs, dest):
     if not os.path.exists(dest):
         try:
             os.mkdir(dest)
-        except OSError, err:
-            print >>sys.stderr, "Error creating destination directory '%s': %s" % (dest, err)
+        except OSError as err:
+            print("Error creating destination directory '%s': %s" % (dest, err), file=sys.stderr)
             sys.exit(EDEST_CREATE)
 
     if os.path.isfile(dest):
-        print >>sys.stderr, "Destination '%s' already exists and is a file" % dest
+        print("Destination '%s' already exists and is a file" % dest, file=sys.stderr)
         sys.exit(EDEST_IS_FILE)
 
     if os.path.isdir(dest) and not os.access(dest, os.W_OK|os.X_OK):
-        print >>sys.stderr, "Destination directory '%s' not writable" % dest
+        print("Destination directory '%s' not writable" % dest, file=sys.stderr)
         sys.exit(EDEST_NO_ACCESS)
 
 
@@ -1226,7 +1280,7 @@ def _create_level_entries(cwd, max_entries, files_pct):
     files_nr = 0
     level_entries = random.randint(0, max_entries)
 
-    for _ in xrange(level_entries):
+    for _ in range(level_entries):
         if random.randint(1, 100) <= files_pct:
             fhandle, _ = tempfile.mkstemp(dir=cwd)
             os.close(fhandle)
@@ -1311,32 +1365,32 @@ class TestHelpers(unittest.TestCase):
     def test_get_human_size(self):
         """ convert bytes to human readable string """
         val = get_human_size(1024)
-        self.assertEquals(val, '1.0 K')
+        self.assertEqual(val, '1.0 K')
 
     def test_get_human_size2(self):
         """ convert bytes to human readable string """
         val = get_human_size(1024*1024)
-        self.assertEquals(val, '1.0 M')
+        self.assertEqual(val, '1.0 M')
 
     def test_human_size(self):
         """ convert human readable size to bytes """
         val = human_size("1024")
-        self.assertEquals(val, 1024)
+        self.assertEqual(val, 1024)
 
     def test_human_size2(self):
         """ convert human readable size to bytes """
         val = human_size("1M")
-        self.assertEquals(val, 1024*1024)
+        self.assertEqual(val, 1024*1024)
 
     def test_human_size3(self):
         """ wrongly formatted size """
         val = human_size("10KK")
-        self.assertEquals(val, None)
+        self.assertEqual(val, None)
 
     def test_human_size4(self):
         """ bad suffix  """
         val = human_size("10Q")
-        self.assertEquals(val, None)
+        self.assertEqual(val, None)
 
 
 class TestOptionsParser(unittest.TestCase):
@@ -1347,9 +1401,9 @@ class TestOptionsParser(unittest.TestCase):
     def test_nooption(self):
         """ parse cmdline without argument"""
         try:
-            cmdline = shlex.split("msrsync")
+            cmdline = shlex.split("msrsync3")
             parse_cmdline(cmdline)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, EOPTION_PARSER)
             return
 
@@ -1358,9 +1412,9 @@ class TestOptionsParser(unittest.TestCase):
     def test_justrsync(self):
         """ parse cmdline with only --rsync option"""
         try:
-            cmdline = shlex.split("msrsync --rsync")
+            cmdline = shlex.split("msrsync3 --rsync")
             parse_cmdline(cmdline)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, EOPTION_PARSER)
             return
 
@@ -1369,9 +1423,9 @@ class TestOptionsParser(unittest.TestCase):
     def test_badsize(self):
         """ parse cmdline with a bad size"""
         try:
-            cmdline = shlex.split("msrsync -s abcde src dest")
+            cmdline = shlex.split("msrsync3 -s abcde src dest")
             parse_cmdline(cmdline)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, EOPTION_PARSER)
             return
 
@@ -1380,9 +1434,9 @@ class TestOptionsParser(unittest.TestCase):
     def test_badsize2(self):
         """ parse cmdline with a bad size"""
         try:
-            cmdline = shlex.split("msrsync -s abcde src dest")
+            cmdline = shlex.split("msrsync3 -s abcde src dest")
             parse_cmdline(cmdline)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, EOPTION_PARSER)
             return
 
@@ -1392,9 +1446,9 @@ class TestOptionsParser(unittest.TestCase):
     def test_bad_filesnumber(self):
         """ parse cmdline with a bad size"""
         try:
-            cmdline = shlex.split("msrsync -f abcde src dest")
+            cmdline = shlex.split("msrsync3 -f abcde src dest")
             parse_cmdline(cmdline)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, EOPTION_PARSER)
             return
 
@@ -1403,9 +1457,9 @@ class TestOptionsParser(unittest.TestCase):
     def test_only_src(self):
         """ parse cmdline with only a source dir"""
         try:
-            cmdline = shlex.split("msrsync src")
+            cmdline = shlex.split("msrsync3 src")
             parse_cmdline(cmdline)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, EOPTION_PARSER)
             return
 
@@ -1413,7 +1467,7 @@ class TestOptionsParser(unittest.TestCase):
 
     def test_src_dst(self):
         """ test a basic and valid command line """
-        cmdline = shlex.split("msrsync src dst")
+        cmdline = shlex.split("msrsync3 src dst")
         opt, srcs, dst = parse_cmdline(cmdline)
         self.assertEqual(opt.rsync, DEFAULT_RSYNC_OPTIONS)
         self.assertEqual(srcs, ["src"])
@@ -1421,7 +1475,7 @@ class TestOptionsParser(unittest.TestCase):
 
     def test_src_multiple_dst(self):
         """ test a command line with multiple sources """
-        cmdline = shlex.split("msrsync src1 src2 dst")
+        cmdline = shlex.split("msrsync3 src1 src2 dst")
         opt, srcs, dst = parse_cmdline(cmdline)
         self.assertEqual(opt.rsync, DEFAULT_RSYNC_OPTIONS)
         self.assertEqual(srcs, ["src1", "src2"])
@@ -1429,7 +1483,7 @@ class TestOptionsParser(unittest.TestCase):
 
     def test_src_dst_rsync(self):
         """ test a basic and valid command line with rsync option """
-        cmdline = shlex.split("""msrsync --rsync "--numeric-ids" src dst""")
+        cmdline = shlex.split("""msrsync3 --rsync "--numeric-ids" src dst""")
         opt, srcs, dst = parse_cmdline(cmdline)
         self.assertEqual(opt.rsync, "--numeric-ids")
         self.assertEqual(srcs, ["src"])
@@ -1437,7 +1491,7 @@ class TestOptionsParser(unittest.TestCase):
 
     def test_src_multiple_dst_rsync(self):
         """ test a command line with multiple sources """
-        cmdline = shlex.split("""msrsync --rsync "--numeric-ids" src1 src2 dst""")
+        cmdline = shlex.split("""msrsync3 --rsync "--numeric-ids" src1 src2 dst""")
         opt, srcs, dst = parse_cmdline(cmdline)
         self.assertEqual(opt.rsync, "--numeric-ids")
         self.assertEqual(srcs, ["src1", "src2"])
@@ -1446,9 +1500,9 @@ class TestOptionsParser(unittest.TestCase):
     def test_src_dest_empty_rsync(self):
         """ test a basic and valid command line, but with empty rsync option """
         try:
-            cmdline = shlex.split("msrsync --rsync src dst")
+            cmdline = shlex.split("msrsync3 --rsync src dst")
             parse_cmdline(cmdline)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, EOPTION_PARSER)
             return
 
@@ -1457,9 +1511,9 @@ class TestOptionsParser(unittest.TestCase):
     def test_rsync_delete(self):
         """ command line with --rsync option that contains --delete """
         try:
-            cmdline = shlex.split("""msrsync --rsync "--delete" dst""")
+            cmdline = shlex.split("""msrsync3 --rsync "--delete" dst""")
             parse_cmdline(cmdline)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, EOPTION_PARSER)
             return
 
@@ -1468,20 +1522,9 @@ class TestOptionsParser(unittest.TestCase):
     def test_rsync_delete2(self):
         """ command line with --rsync option that contains --delete """
         try:
-            cmdline = shlex.split("""msrsync --rsync "-a --numeric-ids --delete" src dst""")
+            cmdline = shlex.split("""msrsync3 --rsync "-a --numeric-ids --delete" src dst""")
             parse_cmdline(cmdline)
-        except SystemExit, err:
-            self.assertEqual(err.code, EOPTION_PARSER)
-            return
-
-        self.fail("Should have raised a SystemExit exception")
-
-    def test_rsync_delete3(self):
-        """ command line with -r option that contains --delete """
-        try:
-            cmdline = shlex.split("""msrsync -r "-a --numeric-ids --delete" src dst""")
-            parse_cmdline(cmdline)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, EOPTION_PARSER)
             return
 
@@ -1498,7 +1541,7 @@ class TestRsyncOptionsChecker(unittest.TestCase):
         try:
             rsync_options = "--this-is-fake"
             _check_rsync_options(rsync_options)
-        except SystemExit, err:
+        except SystemExit as err:
             self.assertEqual(err.code, ERSYNC_OPTIONS_CHECK)
             return
 
@@ -1527,9 +1570,9 @@ class TestSyncAPI(unittest.TestCase):
 
     def _msrsync_test_helper(self, options=""):
         """ msrsync test helper """
-        cmdline = """msrsync %s %s %s""" % (options, self.src, self.dst)
+        cmdline = """msrsync3 %s %s %s""" % (options, self.src, self.dst)
         main(shlex.split(cmdline))
-        self.assert_(_compare_trees(self.src, self.dst), "The source %s and destination %s tree are not equal." % (self.src, self.dst))
+        self.assertTrue(_compare_trees(self.src, self.dst), "The source %s and destination %s tree are not equal." % (self.src, self.dst))
 
     def test_simple_msrsync_api(self):
         """ test simple msrsync synchronisation """
@@ -1572,18 +1615,18 @@ class TestSyncCLI(unittest.TestCase):
         """ msrsync test helper """
         cmd = "%s %s %s %s" % (os.path.realpath(__file__), options, self.src + os.sep, self.dst)
         ret, _, _, timeout, _ = run(cmd, timeout_sec=60)
-        self.assert_(not timeout, "The msrsync command has timeouted.")
+        self.assertTrue(not timeout, "The msrsync command has timed out.")
         self.assertEqual(ret, 0, "The msrsync command has failed.")
-        self.assert_(_compare_trees(self.src, self.dst), "The source %s and destination %s tree are not equal." % (self.src, self.dst))
+        self.assertTrue(_compare_trees(self.src, self.dst), "The source %s and destination %s tree are not equal." % (self.src, self.dst))
 
 
     def test_simple_rsync(self):
         """ test simple rsync synchronisation """
         cmd = "%s %s %s %s" % (RSYNC_EXE, DEFAULT_RSYNC_OPTIONS, self.src + os.sep, self.dst)
         ret, _, _, timeout, _ = run(cmd, timeout_sec=60)
-        self.assert_(not timeout, "The rsync command has timeouted.")
+        self.assertTrue(not timeout, "The rsync command has timeouted.")
         self.assertEqual(ret, 0, "The rsync command has failed.")
-        self.assert_(_compare_trees(self.src, self.dst), "The source and destination tree are not equal. %s %s" % (self.src, self.dst))
+        self.assertTrue(_compare_trees(self.src, self.dst), "The source and destination tree are not equal. %s %s" % (self.src, self.dst))
 
     def test_simple_msrsync_cli(self):
         """ test simple msrsync synchronisation """
@@ -1632,7 +1675,7 @@ def _check_root(msg=None):
     """ Check if the caller is running under root """
     msg = "Need to be root" if not msg else msg
     if os.geteuid() != 0:
-        print >>sys.stderr, "You're not root. Buffer cache will not be dropped between run. Take the result with caution."
+        print("You're not root. Buffer cache will not be dropped between run. Take the result with caution.", file=sys.stderr)
     return True
 
 
@@ -1645,7 +1688,7 @@ def drop_caches(value=3):
         with open(drop_caches_path, "w") as proc_file:
             proc_file.write(str(value))
     else:
-        print >>sys.stderr, "/proc/sys/vm/drop_caches does not exist. Cannot drop buffer cache"
+        print("/proc/sys/vm/drop_caches does not exist. Cannot drop buffer cache", file=sys.stderr)
 
 
 def bench(total_entries=10000, max_entries_per_level=128, max_depth=5, files_pct=95, src=None, dst=None):
@@ -1659,7 +1702,7 @@ def bench(total_entries=10000, max_entries_per_level=128, max_depth=5, files_pct
         if ret == 666:
             sys.exit(EMSRSYNC_INTERRUPTED)
         if ret != 0 or timeout:
-            print >>sys.stderr, "Problem running %s, aborting benchmark: %s" % (cmd, stderr)
+            print("Problem running %s, aborting benchmark: %s" % (cmd, stderr), file=sys.stderr)
             sys.exit(EBENCH)
         return elapsed
 
@@ -1667,7 +1710,7 @@ def bench(total_entries=10000, max_entries_per_level=128, max_depth=5, files_pct
         """ helper """
         cmd = "%s %s %s %s" % (os.path.realpath(__file__), options, src, dst)
         msrsync_elapsed = _run_or_die(cmd)
-        print >>sys.stdout, "msrsync %s took %.2f seconds (speedup x%.2f)" % (options, msrsync_elapsed, reference_result/msrsync_elapsed)
+        print("msrsync %s took %.2f seconds (speedup x%.2f)" % (options, msrsync_elapsed, reference_result/msrsync_elapsed), file=sys.stdout)
 
 
     _check_executables()
@@ -1686,14 +1729,14 @@ def bench(total_entries=10000, max_entries_per_level=128, max_depth=5, files_pct
 
         _create_fake_tree(src, total_entries=total_entries, max_entries_per_level=max_entries_per_level, max_depth=max_depth, files_pct=files_pct)
 
-        print >>sys.stdout, "Benchmarks with %d entries (%d%% of files):" % (total_entries, files_pct)
+        print("Benchmarks with %d entries (%d%% of files):" % (total_entries, files_pct), file=sys.stdout)
 
         shutil.rmtree(dst_in_dst, onerror=rmtree_onerror)
         drop_caches()
 
         cmd = "%s %s %s %s" % (RSYNC_EXE, DEFAULT_RSYNC_OPTIONS, src + os.sep, dst_in_dst)
         rsync_elapsed = _run_or_die(cmd)
-        print >>sys.stdout, "rsync %s took %.2f seconds (speedup x1)" % (DEFAULT_RSYNC_OPTIONS, rsync_elapsed)
+        print("rsync %s took %.2f seconds (speedup x1)" % (DEFAULT_RSYNC_OPTIONS, rsync_elapsed), file=sys.stdout)
 
         shutil.rmtree(dst_in_dst, onerror=rmtree_onerror)
         drop_caches()
@@ -1735,8 +1778,8 @@ def benchshm(total_entries=10000, max_entries_per_level=128, max_depth=5, files_
         shm = os.getenv("SHM", "/dev/shm")
         src = tempfile.mkdtemp(dir=shm)
         dst = tempfile.mkdtemp(dir=shm)
-    except OSError, err:
-        print >>sys.stderr, "Error creating temporary bench directories in %s: %s" % (shm, err)
+    except OSError as err:
+        print("Error creating temporary bench directories in %s: %s" % (shm, err), file=sys.stderr)
         sys.exit(EBENCH)
 
     try:
@@ -1757,9 +1800,9 @@ def main(cmdline):
 
     if options.version:
         if USING_SCANDIR:
-            print >>sys.stdout, "%s" % VERSION
+            print("%s" % VERSION, file=sys.stdout)
         else:
-            print >>sys.stdout, "%s (no scandir optimization. Use python 3.5+ or install the scandir module)" % VERSION
+            print("%s (no scandir optimization. Use python 3.5+ or install the scandir module)" % VERSION, file=sys.stdout)
         sys.exit(0)
 
     if options.selftest:
