@@ -10,7 +10,7 @@
 # This file includes a copy of the BSD licensed options.py file from the bup project
 # See https://github.com/bup/bup/blob/master/lib/bup/options.py
 
-VERSION = "20170730"
+VERSION = "20220630"
 
 """
 Simple program from a very specific need. I needed to transfer multiple
@@ -96,7 +96,6 @@ MSG_PROGRESS = 12
 
 import os
 import sys
-import platform
 import datetime
 import tempfile
 import shutil
@@ -125,20 +124,6 @@ def _e(value):
         return value.encode(STDOUT_ENCODING)
     else:
         return value
-
-
-# Use the built-in version of scandir/walk if possible, otherwise
-# use the scandir module version
-
-USING_SCANDIR = True
-
-try:
-    if sys.version_info < (3, 5):
-        from scandir import walk
-
-        os.walk = walk
-except ImportError:
-    USING_SCANDIR = False
 
 from multiprocessing.managers import SyncManager
 
@@ -480,20 +465,12 @@ class BucketError(RuntimeError):
 
 
 def _check_python_version():
-    """
-    Stupid python version checker
-    """
-    major, minor, _ = platform.python_version_tuple()
-    if major == 2 and minor < 6:
-        python26_release = datetime.datetime(2008, 10, 1)
-        now = datetime.datetime.now()
-        years = (now - python26_release).days / 365
+    if sys.version_info <= (3,5,0):
         sys.stderr.write(
             (
-                "You need python >= 2.6 to run this program (more than %d years old)."
+                "You need python >= 3.5.0 to run this program."
                 + os.linesep
             )
-            % years
         )
         sys.exit(EPYTHON_VERSION)
 
@@ -2091,14 +2068,7 @@ def main(cmdline):
     options, srcs, dest = parse_cmdline(cmdline)
 
     if options.version:
-        if USING_SCANDIR:
-            print("%s" % VERSION, file=sys.stdout)
-        else:
-            print(
-                "%s (no scandir optimization. Use python 3.5+ or install the scandir module)"
-                % VERSION,
-                file=sys.stdout,
-            )
+        print("%s" % VERSION, file=sys.stdout)
         sys.exit(0)
 
     if options.selftest:
