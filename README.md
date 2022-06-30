@@ -4,6 +4,9 @@
 
 It will split the transfer in multiple buckets while the source is scanned and will hopefully help maximizing the usage of the available bandwidth by running a configurable number of `rsync` processes in parallel. The main limitation is it does not handle remote source or target directory, they must be locally accessible (local disk, nfs/cifs/other mountpoint). I hope to address this in a near future.
 
+## Notes from Terra (@RainofTerra)
+I wanted this working on Python3 so I grabbed somebody else's Python3 fork. I might update maintain or (more likely) I might forget I did this when I'm not looking at an enormous network rsync. 🤷🏻‍♀️
+
 ## Quick example
 
 ```bash
@@ -31,7 +34,7 @@ Intel® Enterprise Edition for Lustre* Software](http://www.intel.com/content/da
 
 ## Requirements
 
-[python](python) >= 2.6 and [rsync](https://rsync.samba.org/)
+[python](python) >= 3.6 and [rsync](https://rsync.samba.org/)
 
 ## Installation
 
