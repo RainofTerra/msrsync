@@ -2090,6 +2090,7 @@ def main(cmdline):
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method('fork')
     try:
         sys.exit(main(sys.argv))
     except (KeyboardInterrupt, SystemExit):

@@ -7,6 +7,8 @@ It will split the transfer in multiple buckets while the source is scanned and w
 ## Notes from Terra (@RainofTerra)
 I wanted this working on Python3 so I grabbed somebody else's Python3 fork. I might update maintain or (more likely) I might forget I did this when I'm not looking at an enormous network rsync. 🤷🏻‍♀️
 
+I changed it to explicitly set `multiprocessing.set_start_method('fork')` because spawn is the new default for Python on MacOS but I don't have time to change this to use `multiprocessing.set_start_method('spawn')` right now so buyer beware etc.
+
 ## Quick example
 
 ```bash
